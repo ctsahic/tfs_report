@@ -440,14 +440,14 @@ def launch_gui() -> None:
     save_pat_var = tk.BooleanVar(value=False)
     tk.Checkbutton(frame, text="Save PAT locally (.azure_devops_pat)", variable=save_pat_var).grid(row=7, column=1, sticky="w", pady=4)
     save_repos_var = tk.BooleanVar(value=False)
-    tk.Checkbutton(frame, text="Save repositories locally (.azure_devops_repos)", variable=save_repos_var).grid(row=7, column=0, sticky="w", pady=4)
+    tk.Checkbutton(frame, text="Save repositories locally (.azure_devops_repos)", variable=save_repos_var).grid(row=8, column=1, sticky="w", pady=4)
 
     run_button = tk.Button(frame, text="Run Report", command=run_report, width=20)
-    run_button.grid(row=8, column=1, sticky="w", pady=8)
+    run_button.grid(row=9, column=1, sticky="w", pady=8)
 
-    tk.Label(frame, text="Status:").grid(row=9, column=0, sticky="nw")
+    tk.Label(frame, text="Status:").grid(row=10, column=0, sticky="nw")
     status_text = tk.Text(frame, width=80, height=10, state="disabled")
-    status_text.grid(row=9, column=1, sticky="we", pady=2)
+    status_text.grid(row=10, column=1, sticky="we", pady=2)
 
     frame.columnconfigure(1, weight=1)
     root.mainloop()
