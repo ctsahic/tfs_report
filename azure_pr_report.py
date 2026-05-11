@@ -18,6 +18,7 @@ import requests
 
 PAT_FILE = Path(".azure_devops_pat")
 REPO_FILE = Path(".azure_devops_repos")
+URL_FILE = Path(".azure_devops_url")
 API_VERSION = "7.1-preview.1"
 
 
@@ -63,16 +64,21 @@ def load_pat() -> str:
     return token
 
 
-def parse_azure_devops_url(url: str) -> tuple[str, str]:
+def parse_azure_devops_url(url: str) -> tuple[str, str, str]:
+    """Parse Azure DevOps URL and return (base_url, organization, project)."""
     normalized = url.rstrip("/")
-    if normalized.startswith("https://"):
-        normalized = normalized[len("https://") :]
+    if not normalized.startswith("https://") and not normalized.startswith("http://"):
+        normalized = "https://" + normalized
+    
     parts = normalized.split("/")
-    if len(parts) < 3:
-        raise ValueError("Azure DevOps URL must include organization and project.")
-    if parts[0].lower() != "dev.azure.com":
-        raise ValueError("URL must start with https://dev.azure.com.")
-    return parts[1], parts[2]
+    if len(parts) < 5:  # https:, domain, org, project
+        raise ValueError("Azure DevOps URL must include organization and project. Example: https://dev.azure.com/org/project")
+    
+    base_url = "/".join(parts[:3])  # https://domain
+    organization = parts[3]
+    project = parts[4]
+    
+    return base_url, organization, project
 
 
 def request_json(url: str, token: str, params: dict | None = None) -> dict:
@@ -118,23 +124,23 @@ def extract_work_item_title(payload: dict) -> str:
     return ""
 
 
-def get_repositories(organization: str, project: str, token: str) -> list[dict]:
-    url = f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories"
+def get_repositories(base_url: str, organization: str, project: str, token: str) -> list[dict]:
+    url = f"{base_url}/{organization}/{project}/_apis/git/repositories"
     return request_json(url, token, params={"api-version": API_VERSION}).get("value", [])
 
 
-def get_pull_requests(organization: str, project: str, repo_id: str, token: str) -> list[dict]:
+def get_pull_requests(base_url: str, organization: str, project: str, repo_id: str, token: str) -> list[dict]:
     url = (
-        f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repo_id}/pullrequests"
+        f"{base_url}/{organization}/{project}/_apis/git/repositories/{repo_id}/pullrequests"
     )
     return request_json(url, token, params={"api-version": API_VERSION, "searchCriteria.status": "all"}).get(
         "value", []
     )
 
 
-def get_work_items_for_pr(organization: str, project: str, repo_id: str, pr_id: int, token: str) -> dict[int, str]:
+def get_work_items_for_pr(base_url: str, organization: str, project: str, repo_id: str, pr_id: int, token: str) -> dict[int, str]:
     url = (
-        f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/workitems"
+        f"{base_url}/{organization}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/workitems"
     )
     work_items: dict[int, str] = {}
     for item in request_json(url, token, params={"api-version": API_VERSION}).get("value", []):
@@ -145,7 +151,7 @@ def get_work_items_for_pr(organization: str, project: str, repo_id: str, pr_id: 
     return work_items
 
 
-def get_work_item_details(organization: str, project: str, ids: list[int], token: str) -> dict[int, str]:
+def get_work_item_details(base_url: str, organization: str, project: str, ids: list[int], token: str) -> dict[int, str]:
     if not ids:
         return {}
 
@@ -153,8 +159,8 @@ def get_work_item_details(organization: str, project: str, ids: list[int], token
     for wid in ids:
         title = ""
         for item_url in [
-            f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{wid}",
-            f"https://dev.azure.com/{organization}/_apis/wit/workitems/{wid}",
+            f"{base_url}/{organization}/{project}/_apis/wit/workitems/{wid}",
+            f"{base_url}/{organization}/_apis/wit/workitems/{wid}",
         ]:
             try:
                 response = request_json(
@@ -170,8 +176,8 @@ def get_work_item_details(organization: str, project: str, ids: list[int], token
 
         if not title:
             for edit_url in [
-                f"https://dev.azure.com/{organization}/{project}/_workitems/edit/{wid}/",
-                f"https://dev.azure.com/{organization}/_workitems/edit/{wid}/",
+                f"{base_url}/{organization}/{project}/_workitems/edit/{wid}/",
+                f"{base_url}/{organization}/_workitems/edit/{wid}/",
             ]:
                 try:
                     html = request_text(edit_url, token)
@@ -200,6 +206,7 @@ def get_work_item_details(organization: str, project: str, ids: list[int], token
 
 
 def build_report_rows(
+    base_url: str,
     organization: str,
     project: str,
     repo_names: list[str],
@@ -223,13 +230,13 @@ def build_report_rows(
     work_item_cache: dict[int, str] = {}
 
     for repo in selected_repos:
-        pr_list = get_pull_requests(organization, project, repo["id"], token)
+        pr_list = get_pull_requests(base_url, organization, project, repo["id"], token)
         for pr in pr_list:
             created_date = datetime.fromisoformat(pr["creationDate"].replace("Z", "+00:00")).replace(tzinfo=None)
             if created_date < from_dt or created_date > to_dt:
                 continue
 
-            work_item_refs = get_work_items_for_pr(organization, project, repo["id"], pr["pullRequestId"], token)
+            work_item_refs = get_work_items_for_pr(base_url, organization, project, repo["id"], pr["pullRequestId"], token)
             work_item_ids = list(work_item_refs.keys())
             for wid, title in work_item_refs.items():
                 if title:
@@ -238,7 +245,7 @@ def build_report_rows(
             missing_ids = [wid for wid, title in work_item_refs.items() if not title and wid not in work_item_cache]
             if missing_ids:
                 try:
-                    work_item_cache.update(get_work_item_details(organization, project, missing_ids, token))
+                    work_item_cache.update(get_work_item_details(base_url, organization, project, missing_ids, token))
                 except requests.HTTPError as exc:
                     print(f"Warning: failed to resolve work item details for IDs {missing_ids}: {exc}")
 
@@ -339,6 +346,22 @@ def load_pat(token: str | None = None, ask_missing: bool = True, save: bool = Fa
     return token
 
 
+def load_azure_url(url: str | None = None, save: bool = False) -> str:
+    """Load and optionally cache Azure DevOps URL."""
+    if url:
+        url = url.strip()
+        if save:
+            URL_FILE.write_text(url + "\n")
+        return url
+
+    if URL_FILE.exists():
+        cached_url = URL_FILE.read_text().strip()
+        if cached_url:
+            return cached_url
+
+    raise ValueError("A valid Azure DevOps URL is required.")
+
+
 def launch_gui() -> None:
     root = tk.Tk()
     root.title("Azure DevOps PR Report")
@@ -355,6 +378,8 @@ def launch_gui() -> None:
         try:
             append_status("Starting report...")
             url = url_entry.get().strip()
+            if not url:
+                raise ValueError("Azure DevOps URL is required.")
             pat = pat_entry.get().strip() or None
             repos_raw = repos_text.get("1.0", "end").strip()
             repo_names = [name.strip() for name in re.split(r"[\n,]+", repos_raw) if name.strip()]
@@ -364,15 +389,22 @@ def launch_gui() -> None:
                     REPO_FILE.write_text(repos_raw.rstrip() + "\n")
                 except Exception:
                     append_status("Warning: failed to save repositories to disk.")
+            # Persist URL if requested
+            if save_url_var.get():
+                try:
+                    URL_FILE.write_text(url + "\n")
+                except Exception:
+                    append_status("Warning: failed to save URL to disk.")
             from_dt = parse_iso_datetime(f"{from_date_entry.get()} {from_time_var.get()}")
             to_dt = parse_iso_datetime(f"{to_date_entry.get()} {to_time_var.get()}")
             output_prefix = output_prefix_entry.get().strip() or "azure_pr_report"
             format_choice = format_var.get()
             output_formats = [format_choice]
-            organization, project = parse_azure_devops_url(url)
+            base_url, organization, project = parse_azure_devops_url(url)
             token = load_pat(pat, ask_missing=False, save=save_pat_var.get())
-            repositories = get_repositories(organization, project, token)
+            repositories = get_repositories(base_url, organization, project, token)
             rows = build_report_rows(
+                base_url,
                 organization,
                 project,
                 repo_names,
@@ -393,7 +425,12 @@ def launch_gui() -> None:
 
     tk.Label(frame, text="Azure DevOps URL:").grid(row=0, column=0, sticky="w")
     url_entry = tk.Entry(frame, width=80)
-    url_entry.insert(0, "https://dev.azure.com/cohentsahi/cohentzahi_agile")
+    # Load cached URL if available
+    try:
+        if URL_FILE.exists():
+            url_entry.insert(0, URL_FILE.read_text().strip())
+    except Exception:
+        pass
     url_entry.grid(row=0, column=1, sticky="we", pady=2)
 
     tk.Label(frame, text="Personal Access Token:").grid(row=1, column=0, sticky="w")
@@ -439,15 +476,17 @@ def launch_gui() -> None:
 
     save_pat_var = tk.BooleanVar(value=False)
     tk.Checkbutton(frame, text="Save PAT locally (.azure_devops_pat)", variable=save_pat_var).grid(row=7, column=1, sticky="w", pady=4)
+    save_url_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(frame, text="Save Azure URL locally (.azure_devops_url)", variable=save_url_var).grid(row=8, column=1, sticky="w", pady=4)
     save_repos_var = tk.BooleanVar(value=False)
-    tk.Checkbutton(frame, text="Save repositories locally (.azure_devops_repos)", variable=save_repos_var).grid(row=8, column=1, sticky="w", pady=4)
+    tk.Checkbutton(frame, text="Save repositories locally (.azure_devops_repos)", variable=save_repos_var).grid(row=9, column=1, sticky="w", pady=4)
 
     run_button = tk.Button(frame, text="Run Report", command=run_report, width=20)
-    run_button.grid(row=9, column=1, sticky="w", pady=8)
+    run_button.grid(row=10, column=1, sticky="w", pady=8)
 
-    tk.Label(frame, text="Status:").grid(row=10, column=0, sticky="nw")
+    tk.Label(frame, text="Status:").grid(row=11, column=0, sticky="nw")
     status_text = tk.Text(frame, width=80, height=10, state="disabled")
-    status_text.grid(row=10, column=1, sticky="we", pady=2)
+    status_text.grid(row=11, column=1, sticky="we", pady=2)
 
     frame.columnconfigure(1, weight=1)
     root.mainloop()
@@ -506,12 +545,13 @@ def main() -> None:
     if not args.from_date or not args.to_date:
         raise SystemExit("--from and --to are required in command-line mode.")
 
-    organization, project = parse_azure_devops_url(args.url)
+    base_url, organization, project = parse_azure_devops_url(args.url)
     token = load_pat()
 
     repo_names = [name.strip() for name in args.repos.split(",") if name.strip()] if args.repos else []
-    repositories = get_repositories(organization, project, token)
+    repositories = get_repositories(base_url, organization, project, token)
     rows = build_report_rows(
+        base_url,
         organization,
         project,
         repo_names,
